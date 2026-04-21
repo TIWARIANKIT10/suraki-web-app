@@ -3,6 +3,10 @@
 import { useState } from "react"
 import { Camera, Mic, MapPin, ChevronRight, Info, RefreshCw } from "lucide-react"
 import InstallPWAButton from '../components/custom/InstallPWAButton';
+import { useRouter } from 'next/navigation';
+import GPSLocation from "@/components/custom/location";
+import AudioRecordCard from '../components/custom/audio';
+import { useIncidentStore } from "@/lib/store/incidentStore";
 
 const colors = {
   bgColor: "#F3F8F6",
@@ -77,24 +81,12 @@ function MediaUploadCard({
 export default function IncidentReportPage() {
   const [description, setDescription] = useState("")
   const [incidentType, setIncidentType] = useState("")
-  const [gpsLocation, setGpsLocation] = useState({ latitude: 27.7172, longitude: 85.324 })
+
   const [loadingLocation, setLoadingLocation] = useState(false)
 
   // UI-only mock states
   const [imageUploaded, setImageUploaded] = useState(false)
   const [audioUploaded, setAudioUploaded] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-
-  const handleMockLocationRefresh = () => {
-    setLoadingLocation(true)
-    setTimeout(() => {
-      setGpsLocation({
-        latitude: 27.7 + Math.random() * 0.05,
-        longitude: 85.3 + Math.random() * 0.05,
-      })
-      setLoadingLocation(false)
-    }, 600)
-  }
 
   const resetForm = () => {
     setDescription("")
@@ -103,29 +95,73 @@ export default function IncidentReportPage() {
     setAudioUploaded(false)
   }
 
-  const handleSubmit = () => {
+const {  imageFile, audioBlob,
+          audioDuration, gpsLocation,
+            reset } = useIncidentStore()
+
+  const [submitting, setSubmitting] = useState(false)
+  const [submitStatus, setSubmitStatus] = useState<"idle"|"success"|"error">("idle")
+
+  const handleSubmit = async () => {
     setSubmitting(true)
-    setTimeout(() => setSubmitting(false), 900)
+    try {
+      const payload = new FormData()
+      payload.append("description", description)
+      payload.append("incidentType", incidentType)
+      payload.append("latitude",  String(gpsLocation?.latitude ?? ""))
+      payload.append("longitude", String(gpsLocation?.longitude ?? ""))
+      payload.append("audioDuration", String(audioDuration))
+      if (imageFile) payload.append("image", imageFile)
+      if (audioBlob) payload.append("audio", audioBlob, "recording.webm")
+
+      const res = await fetch("/api/incidents", { method: "POST", body: payload })
+      if (!res.ok) throw new Error("Failed")
+
+      setSubmitStatus("success")
+      reset()   // ← clears entire store after success
+    } catch {
+      setSubmitStatus("error")
+    } finally {
+      setSubmitting(false)
+    }
   }
+  const router = useRouter()
 
   return (
-    <main className="min-h-screen pb-28" style={{ backgroundColor: colors.bgColor }}>
+    <main className="min-h-screen pb-36" style={{ backgroundColor: colors.bgColor }}>
+      
       {/* Header */}
       <header
-        className="sticky top-0 z-10 border-b px-5 py-4 shadow-sm"
-        style={{ backgroundColor: colors.white, borderColor: "#E4ECE8" }}
+  className="sticky top-0 z-10 border-b shadow-sm"
+  style={{ backgroundColor: colors.white, borderColor: "#E4ECE8" }}
+>
+  <div className="flex items-center justify-between px-5 py-4">
+    
+    {/* Left: Install Button */}
+    <div>
+      <InstallPWAButton />
+    </div>
+
+    {/* Center: Title */}
+    <div className="text-center flex-1">
+      <h1
+        className="text-xl sm:text-2xl font-bold"
+        style={{ color: colors.primary2 }}
       >
-        <h1 className="text-center text-2xl font-bold" style={{ color: colors.primary2 }}>
-          घटना रिपोर्ट
-        </h1>
-        <p className="text-center text-sm" style={{ color: colors.textColor }}>
-          Incident Report
-          <InstallPWAButton/>
-        </p>
+        घटना रिपोर्ट
+      </h1>
+      <p
+        className="text-xs sm:text-sm"
+        style={{ color: colors.textColor }}
+      >
+        Incident Report
+      </p>
+    </div>
 
-      
-      </header>
-
+    {/* Right: Empty space (for balance or future icons) */}
+    <div className="w-[40px]" />
+  </div>
+</header>
       <section className="mx-auto w-full max-w-3xl px-4 py-4">
         <MediaUploadCard
           title="फोटो/भिडियो (Photo/Video)"
@@ -133,7 +169,7 @@ export default function IncidentReportPage() {
           icon={<Camera size={26} color={colors.primary3} />}
           isUploaded={imageUploaded}
           uploadedText="Image uploaded successfully"
-          onClick={() => setImageUploaded((v) => !v)}
+          onClick={() => router.push("/camara")}
         />
 
         {/* Description */}
@@ -156,59 +192,9 @@ export default function IncidentReportPage() {
         </div>
 
         {/* GPS */}
-        <div className="mb-5">
-          <p className="mb-2 text-base font-semibold" style={{ color: colors.primary2 }}>
-            जीपीएस स्थान (GPS Location)
-          </p>
+       <GPSLocation/>
 
-          <div className="rounded-2xl bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center gap-2">
-              <MapPin size={20} color={colors.redColor} />
-              <p className="font-medium" style={{ color: colors.primary2 }}>
-                Current Location
-              </p>
-              {loadingLocation && (
-                <span className="ml-2 text-xs" style={{ color: colors.primary3 }}>
-                  Loading...
-                </span>
-              )}
-            </div>
-
-            <div className="rounded-xl p-3" style={{ backgroundColor: "#F6FAF8" }}>
-              <div className="mb-1 flex items-center justify-between text-sm">
-                <span style={{ color: colors.textColor }}>Latitude:</span>
-                <span className="font-semibold" style={{ color: colors.primary3 }}>
-                  {gpsLocation.latitude.toFixed(6)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span style={{ color: colors.textColor }}>Longitude:</span>
-                <span className="font-semibold" style={{ color: colors.primary3 }}>
-                  {gpsLocation.longitude.toFixed(6)}
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleMockLocationRefresh}
-              className="mt-3 inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition hover:opacity-90"
-              style={{ backgroundColor: `${colors.primary3}20`, color: colors.primary3 }}
-            >
-              <RefreshCw size={16} />
-              Refresh Location
-            </button>
-          </div>
-        </div>
-
-        <MediaUploadCard
-          title="अडियो (Audio)"
-          subtitle="अडियो रेकर्ड गर्नुहोस (Record Audio)"
-          icon={<Mic size={24} color={colors.primary3} />}
-          isUploaded={audioUploaded}
-          uploadedText="Audio recorded successfully"
-          onClick={() => setAudioUploaded((v) => !v)}
-        />
+       <AudioRecordCard/>
 
         {/* Incident Type */}
         <div className="mb-5">
@@ -250,7 +236,7 @@ export default function IncidentReportPage() {
 
       {/* Bottom Buttons */}
       <div
-        className="fixed bottom-0 left-0 right-0 border-t p-3"
+        className="fixed bottom-15 left-0 right-0 border-t p-3"
         style={{ backgroundColor: colors.white, borderColor: "#E4ECE8" }}
       >
         <div className="mx-auto grid w-full max-w-3xl grid-cols-2 gap-3">
