@@ -94,24 +94,58 @@ export default function NativeCameraApp() {
 
     try {
       stopCameraTracks();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: mode === "video",
-      });
+      const baseVideoConstraints: MediaTrackConstraints = {
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      };
+      const wantsAudio = mode === "video";
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            ...baseVideoConstraints,
+            facingMode: { ideal: facingMode },
+          },
+          audio: wantsAudio,
+        });
+      } catch (primaryErr) {
+        // Some devices/browsers can't satisfy facingMode constraints.
+        // Retry with generic video constraints so preview still works.
+        console.warn("Primary camera constraints failed, retrying:", primaryErr);
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: baseVideoConstraints,
+          audio: wantsAudio,
+        });
+      }
       mediaStreamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.pause();
         videoRef.current.srcObject = null;
+        videoRef.current.src = "";
+        videoRef.current.load();
         videoRef.current.srcObject = stream;
         videoRef.current.muted = true;
         videoRef.current.playsInline = true;
 
         try {
+          if (videoRef.current.readyState < HTMLMediaElement.HAVE_METADATA) {
+            await new Promise<void>((resolve) => {
+              const videoEl = videoRef.current;
+              if (!videoEl) {
+                resolve();
+                return;
+              }
+              const onLoadedMetadata = () => {
+                videoEl.removeEventListener("loadedmetadata", onLoadedMetadata);
+                resolve();
+              };
+              videoEl.addEventListener("loadedmetadata", onLoadedMetadata, {
+                once: true,
+              });
+            });
+          }
           await videoRef.current.play();
         } catch (playErr) {
           if (playErr instanceof Error && playErr.name === "AbortError") {

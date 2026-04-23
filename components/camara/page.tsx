@@ -1,18 +1,5 @@
 "use client";
 
-/**
- * NativeCameraApp
- *
- * FLOW:
- *  PHOTO:  live → [shutter] → review screen (photo frozen fullscreen)
- *                → [Save]    → addPhoto() in Zustand → router.push("/")
- *                → [Discard] → back to live camera
- *
- *  VIDEO:  live → [shutter] → recording → [shutter] → review screen (video plays back)
- *                → [Save]    → addVideo() in Zustand → router.push("/")
- *                → [Discard] → back to live camera
- */
-
 import React, {
   useCallback,
   useEffect,
@@ -24,13 +11,11 @@ import { useRouter } from "next/navigation";
 import { create } from "zustand";
 
 // ─── Zustand Store ────────────────────────────────────────────────────────────
-// In your real project move this to e.g. store/useCameraStore.ts
-
 interface CapturedMedia {
   id: string;
   type: "photo" | "video";
-  dataUrl?: string; // photo
-  blob?: Blob;      // video
+  dataUrl?: string;
+  blob?: Blob;
   timestamp: number;
 }
 
@@ -58,45 +43,38 @@ export const useCameraStore = create<CameraStore>((set) => ({
     })),
 }));
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 type Mode = "photo" | "video";
+type Screen = "LIVE" | "PHOTO_REVIEW" | "VIDEO_REVIEW";
 
-// What screen is the user on?
-type Screen =
-  | "LIVE"          // Camera viewfinder (idle or recording)
-  | "PHOTO_REVIEW"  // Frozen photo — save or discard
-  | "VIDEO_REVIEW"; // Recorded video playback — save or discard
-
-// ─── Component ────────────────────────────────────────────────────────────────
 export default function NativeCameraApp() {
   const router = useRouter();
   const { addPhoto, addVideo } = useCameraStore();
 
-  // Refs
-  const videoRef         = useRef<HTMLVideoElement>(null);
-  const recorderRef      = useRef<MediaRecorder | null>(null);
-  const streamRef        = useRef<MediaStream | null>(null);
-  const chunksRef        = useRef<Blob[]>([]);
-  const playbackUrlRef   = useRef<string | null>(null);
-  const isStartingRef    = useRef(false);
+  const videoRef       = useRef<HTMLVideoElement>(null);
+  const reviewVideoRef = useRef<HTMLVideoElement>(null); // dedicated review video element
+  const recorderRef    = useRef<MediaRecorder | null>(null);
+  const streamRef      = useRef<MediaStream | null>(null);
+  const chunksRef      = useRef<Blob[]>([]);
+  const playbackUrlRef = useRef<string | null>(null);
+  const isStartingRef  = useRef(false);
 
-  // Screen state
-  const [screen, setScreen]             = useState<Screen>("LIVE");
-  const [mode, setMode]                 = useState<Mode>("photo");
-  const [isRecording, setIsRecording]   = useState(false);
-  const [isBusy, setIsBusy]             = useState(false);
+  const [screen, setScreen]           = useState<Screen>("LIVE");
+  const [mode, setMode]               = useState<Mode>("photo");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isBusy, setIsBusy]           = useState(false);
 
-  // Captured data
   const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(null);
   const [videoBlob, setVideoBlob]       = useState<Blob | null>(null);
+  const [videoPlaybackUrl, setVideoPlaybackUrl] = useState<string | null>(null);
 
-  // UI extras
-  const [facing, setFacing]             = useState<"user" | "environment">("environment");
-  const [zoom, setZoom]                 = useState(1);
-  const [recSecs, setRecSecs]           = useState(0);
-  const [flashBang, setFlashBang]       = useState(false);
+  const [facing, setFacing]   = useState<"user" | "environment">("environment");
+  const [zoom, setZoom]       = useState(1);
+  const [recSecs, setRecSecs] = useState(0);
+  const [flashBang, setFlashBang] = useState(false);
 
-  // ── Recording timer ──────────────────────────────────────────────────────
+  // Saved toast state
+  const [saved, setSaved] = useState(false);
+
   useEffect(() => {
     if (!isRecording) { setRecSecs(0); return; }
     const t = setInterval(() => setRecSecs((s) => s + 1), 1000);
@@ -109,19 +87,16 @@ export default function NativeCameraApp() {
     return `${m}:${s}`;
   }, [recSecs]);
 
-  // ── Stop camera tracks ────────────────────────────────────────────────────
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     if (videoRef.current) {
       (videoRef.current.srcObject as MediaStream | null)
-        ?.getTracks()
-        .forEach((t) => t.stop());
+        ?.getTracks().forEach((t) => t.stop());
       videoRef.current.srcObject = null;
     }
   }, []);
 
-  // ── Start live camera ─────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
     if (isStartingRef.current) return;
     isStartingRef.current = true;
@@ -129,7 +104,6 @@ export default function NativeCameraApp() {
 
     try {
       stopStream();
-      // Revoke any leftover playback URL
       if (playbackUrlRef.current) {
         URL.revokeObjectURL(playbackUrlRef.current);
         playbackUrlRef.current = null;
@@ -160,8 +134,7 @@ export default function NativeCameraApp() {
       setIsRecording(false);
       setPhotoDataUrl(null);
       setVideoBlob(null);
-      // Release busy immediately — shutter should be pressable as soon as
-      // the video is playing. Don't wait for the finally block.
+      setVideoPlaybackUrl(null);
       setIsBusy(false);
     } catch (err) {
       console.error(err);
@@ -172,64 +145,54 @@ export default function NativeCameraApp() {
     }
   }, [facing, mode, stopStream]);
 
-  // Auto-start camera (and restart when facing/mode changes)
-  useEffect(() => {
-    startCamera();
-  }, [startCamera]);
+  useEffect(() => { startCamera(); }, [startCamera]);
 
-  // Cleanup on unmount
   useEffect(() => () => {
     stopStream();
     if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
   }, [stopStream]);
 
-  // ── PHOTO: capture → review ───────────────────────────────────────────────
+  // Auto-play review video when it becomes available
+useEffect(() => {
+  if (screen === "VIDEO_REVIEW" && reviewVideoRef.current && videoPlaybackUrl) {
+    const vid = reviewVideoRef.current;
+
+    vid.srcObject = null; // 🔴 IMPORTANT
+    vid.src = videoPlaybackUrl;
+
+    vid.onloadeddata = () => {
+      vid.play().catch(() => {});
+    };
+  }
+}, [screen, videoPlaybackUrl]);
+
   const capturePhoto = useCallback(() => {
-    const vid = videoRef.current;
+  const vid = videoRef.current;
+  if (!vid || vid.readyState < 2) return;
 
-    // Guard: video element must exist and have actual video dimensions
-    // NOTE: we intentionally do NOT check streamRef here — on some mobile
-    // browsers the ref can lag behind; checking videoWidth > 0 is the real
-    // signal that the camera is producing frames.
-    if (!vid || vid.videoWidth === 0 || vid.readyState < 2) {
-      console.warn("capturePhoto: video not ready", {
-        vid: !!vid,
-        videoWidth: vid?.videoWidth,
-        readyState: vid?.readyState,
-      });
-      return;
-    }
+  const canvas = document.createElement("canvas");
+  canvas.width = vid.videoWidth;
+  canvas.height = vid.videoHeight;
 
-    console.log("capturePhoto: capturing", vid.videoWidth, "x", vid.videoHeight);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
 
-    // Flash animation
-    setFlashBang(true);
-    setTimeout(() => setFlashBang(false), 180);
+  if (facing === "user") {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
 
-    // Draw current frame to canvas
-    const canvas = document.createElement("canvas");
-    canvas.width  = vid.videoWidth;
-    canvas.height = vid.videoHeight;
-    const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(vid, 0, 0);
 
-    // Mirror selfie camera
-    if (facing === "user") {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    ctx.drawImage(vid, 0, 0);
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
 
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.93);
+  // 🔴 STOP CAMERA BEFORE PREVIEW
+  stopStream();
 
-    // Freeze live feed — keep stream alive so Discard → retake is instant
-    vid.pause();
+  setPhotoDataUrl(dataUrl);
+  setScreen("PHOTO_REVIEW");
+}, [facing, stopStream]);
 
-    console.log("capturePhoto: done, switching to PHOTO_REVIEW");
-    setPhotoDataUrl(dataUrl);
-    setScreen("PHOTO_REVIEW");
-  }, [facing]);
-
-  // ── VIDEO: start recording ────────────────────────────────────────────────
   const startRecording = useCallback(() => {
     if (!streamRef.current) return;
     chunksRef.current = [];
@@ -246,79 +209,67 @@ export default function NativeCameraApp() {
     recorder.ondataavailable = (e) => {
       if (e.data?.size > 0) chunksRef.current.push(e.data);
     };
+recorder.onstop = () => {
+  const blob = new Blob(chunksRef.current, { type: "video/webm" });
 
-    recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: mime || "video/webm" });
+  // 🔴 STOP CAMERA FIRST
+  stopStream();
 
-      // Stop live stream — we no longer need it
-      stopStream();
+  const url = URL.createObjectURL(blob);
 
-      // Attach blob for playback
-      const url = URL.createObjectURL(blob);
-      playbackUrlRef.current = url;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-        videoRef.current.src = url;
-        videoRef.current.muted = false;
-        videoRef.current.controls = true;
-        videoRef.current.loop = true;
-        videoRef.current.play().catch(() => {});
-      }
-
-      setVideoBlob(blob);
-      setIsRecording(false);
-      setScreen("VIDEO_REVIEW");
-    };
+  setVideoBlob(blob);
+  setVideoPlaybackUrl(url);
+  setScreen("VIDEO_REVIEW");
+  setIsRecording(false);
+};
 
     recorder.start(1000);
     setIsRecording(true);
   }, [stopStream]);
 
-  // ── VIDEO: stop recording → triggers recorder.onstop above ───────────────
   const stopRecording = useCallback(() => {
     if (recorderRef.current?.state === "recording") {
       recorderRef.current.stop();
     }
   }, []);
 
-  // ── Shutter press ─────────────────────────────────────────────────────────
   const handleShutter = useCallback(() => {
-    console.log("handleShutter:", { mode, isRecording, screen });
     if (mode === "photo") {
       capturePhoto();
     } else {
       isRecording ? stopRecording() : startRecording();
     }
-  }, [mode, isRecording, screen, capturePhoto, stopRecording, startRecording]);
+  }, [mode, isRecording, capturePhoto, stopRecording, startRecording]);
 
-  // ── SAVE ──────────────────────────────────────────────────────────────────
   const handleSave = useCallback(() => {
     if (screen === "PHOTO_REVIEW" && photoDataUrl) {
       addPhoto(photoDataUrl);
     } else if (screen === "VIDEO_REVIEW" && videoBlob) {
       addVideo(videoBlob);
     }
-    // Clean up and go home
-    stopStream();
-    if (playbackUrlRef.current) {
-      URL.revokeObjectURL(playbackUrlRef.current);
-      playbackUrlRef.current = null;
-    }
-    router.push("/");
+    setSaved(true);
+    setTimeout(() => {
+      stopStream();
+      if (playbackUrlRef.current) {
+        URL.revokeObjectURL(playbackUrlRef.current);
+        playbackUrlRef.current = null;
+      }
+      router.push("/");
+    }, 900);
   }, [screen, photoDataUrl, videoBlob, addPhoto, addVideo, stopStream, router]);
 
-  // ── DISCARD → back to live camera ────────────────────────────────────────
   const handleDiscard = useCallback(() => {
-    if (videoRef.current) {
-      videoRef.current.controls = false;
-      videoRef.current.loop     = false;
-      videoRef.current.src      = "";
-    }
-    startCamera();
-  }, [startCamera]);
+  setPhotoDataUrl(null);
+  setVideoBlob(null);
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  if (videoPlaybackUrl) {
+    URL.revokeObjectURL(videoPlaybackUrl);
+    setVideoPlaybackUrl(null);
+  }
+
+  startCamera(); // 🔴 restart camera cleanly
+}, [videoPlaybackUrl, startCamera]); 
+
   const handleBack = () => {
     if (isRecording) stopRecording();
     stopStream();
@@ -333,22 +284,18 @@ export default function NativeCameraApp() {
 
   const isReview = screen === "PHOTO_REVIEW" || screen === "VIDEO_REVIEW";
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black text-white select-none">
 
-      {/* ══════════════════════════════════════════════════
-          VIDEO ELEMENT — live viewfinder AND playback
-      ══════════════════════════════════════════════════ */}
+      {/* Live viewfinder — always mounted, hidden during review */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 h-full w-full object-cover"
+        className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
         style={{
+          opacity: isReview ? 0 : 1,
           transform:
             facing === "user" && screen !== "VIDEO_REVIEW"
               ? `scaleX(-1) scale(${zoom})`
@@ -356,64 +303,91 @@ export default function NativeCameraApp() {
         }}
       />
 
-      {/* ══════════════════════════════════════════════════
-          PHOTO REVIEW OVERLAY
-          Sits on top of everything when screen = PHOTO_REVIEW
-      ══════════════════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════
+          PHOTO REVIEW SCREEN
+      ══════════════════════════════════════════ */}
       {screen === "PHOTO_REVIEW" && photoDataUrl && (
-        <div className="absolute inset-0 z-30">
+        <div className="absolute inset-0 z-30 flex flex-col bg-black">
+
           {/* Fullscreen photo */}
-          <img
-            src={photoDataUrl}
-            alt="Review"
-            className="absolute inset-0 h-full w-full object-cover"
-          />
+          <div className="relative flex-1 overflow-hidden">
+            <img
+              src={photoDataUrl}
+              alt="Captured photo"
+              className="h-full w-full object-contain"
+              style={{ animation: "reviewFadeIn 0.35s ease-out" }}
+            />
 
-          {/* Top dim + label */}
-          <div className="absolute inset-x-0 top-0 h-36 bg-gradient-to-b from-black/70 to-transparent" />
-          <p className="absolute top-14 inset-x-0 text-center text-xs font-semibold tracking-[0.18em] uppercase text-white/70">
-            Review Photo
-          </p>
+            {/* Top gradient + label */}
+            <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/80 to-transparent" />
+            <div className="absolute top-0 inset-x-0 flex items-center justify-between px-4 pt-12">
+              <button
+                onClick={handleDiscard}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md active:scale-90 transition-transform"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/80 bg-black/30 px-3 py-1 rounded-full backdrop-blur-md">
+                📷 Photo Preview
+              </span>
+              <div className="w-10" />
+            </div>
 
-          {/* ── Save / Discard bar ── */}
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-6 pb-14 pt-20">
-            <div className="flex gap-4">
+            {/* Saved overlay */}
+            {saved && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                style={{ animation: "reviewFadeIn 0.2s ease-out" }}>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-white">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+                      stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <p className="text-lg font-semibold text-white">Photo Saved!</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Bottom action bar */}
+          <div className="flex-shrink-0 bg-black px-5 pb-10 pt-5">
+            <p className="mb-4 text-center text-xs text-white/40 tracking-wide">
+              Choose what to do with this photo
+            </p>
+            <div className="flex gap-3">
 
               {/* Discard */}
               <button
                 onClick={handleDiscard}
-                className="
-                  flex flex-1 flex-col items-center justify-center gap-2
-                  rounded-2xl border border-white/20 bg-white/10 backdrop-blur-md
-                  py-5 active:scale-95 transition-transform
-                "
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/8 py-4 active:scale-95 transition-transform backdrop-blur-md"
               >
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                   stroke="#f87171" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="3 6 5 6 21 6" />
                   <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                   <path d="M10 11v6M14 11v6" />
                   <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
                 </svg>
-                <span className="text-sm font-medium text-white/80">Discard</span>
+                <span className="text-sm font-semibold text-red-400">Retake</span>
               </button>
 
-              {/* Save */}
+              {/* Save / Add */}
               <button
                 onClick={handleSave}
-                className="
-                  flex flex-[2] flex-col items-center justify-center gap-2
-                  rounded-2xl bg-white
-                  py-5 active:scale-95 transition-transform
-                "
+                disabled={saved}
+                className="flex flex-[2] items-center justify-center gap-2 rounded-2xl bg-white py-4 active:scale-95 transition-transform disabled:opacity-60"
               >
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                   stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
                   <polyline points="17 21 17 13 7 13 7 21" />
                   <polyline points="7 3 7 8 15 8" />
                 </svg>
-                <span className="text-sm font-semibold text-black">Save Photo</span>
+                <span className="text-sm font-bold text-black">Add Photo</span>
               </button>
 
             </div>
@@ -421,74 +395,116 @@ export default function NativeCameraApp() {
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════
-          VIDEO REVIEW — Save / Discard bar only
-          (the video plays back through the <video> element)
-      ══════════════════════════════════════════════════ */}
-      {screen === "VIDEO_REVIEW" && (
-        <div className="absolute inset-x-0 bottom-0 z-30 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-6 pb-14 pt-20">
+      {/* ══════════════════════════════════════════
+          VIDEO REVIEW SCREEN
+      ══════════════════════════════════════════ */}
+      {screen === "VIDEO_REVIEW" && videoPlaybackUrl && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-black">
 
-          {/* Review label */}
-          <p className="mb-5 text-center text-xs font-semibold tracking-[0.18em] uppercase text-white/60">
-            Review Video
-          </p>
+          {/* Video player area */}
+          <div className="relative flex-1 overflow-hidden bg-black">
+            <video
+              ref={reviewVideoRef}
+              playsInline
+              controls
+              loop
+              muted={false}
+              className="h-full w-full object-contain"
+              style={{ animation: "reviewFadeIn 0.35s ease-out" }}
+            />
 
-          <div className="flex gap-4">
+            {/* Top overlay */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/80 to-transparent" />
+            <div className="absolute top-0 inset-x-0 flex items-center justify-between px-4 pt-12 pointer-events-none">
+              <div className="w-10" />
+              <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/80 bg-black/30 px-3 py-1 rounded-full backdrop-blur-md">
+                🎬 Video Preview
+              </span>
+              <div className="w-10" />
+            </div>
 
-            {/* Discard */}
+            {/* Back button — pointer events enabled */}
             <button
               onClick={handleDiscard}
-              className="
-                flex flex-1 flex-col items-center justify-center gap-2
-                rounded-2xl border border-white/20 bg-white/10 backdrop-blur-md
-                py-5 active:scale-95 transition-transform
-              "
+              className="absolute top-12 left-4 flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md active:scale-90 transition-transform"
             >
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-                stroke="#f87171" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
               </svg>
-              <span className="text-sm font-medium text-white/80">Discard</span>
             </button>
 
-            {/* Save */}
-            <button
-              onClick={handleSave}
-              className="
-                flex flex-[2] flex-col items-center justify-center gap-2
-                rounded-2xl bg-white
-                py-5 active:scale-95 transition-transform
-              "
-            >
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
-                stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                <polyline points="17 21 17 13 7 13 7 21" />
-                <polyline points="7 3 7 8 15 8" />
-              </svg>
-              <span className="text-sm font-semibold text-black">Save Video</span>
-            </button>
+            {/* Saved overlay */}
+            {saved && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                style={{ animation: "reviewFadeIn 0.2s ease-out" }}>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-white">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+                      stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <p className="text-lg font-semibold text-white">Video Saved!</p>
+                </div>
+              </div>
+            )}
+          </div>
 
+          {/* Bottom action bar */}
+          <div className="flex-shrink-0 bg-black px-5 pb-10 pt-5">
+            <p className="mb-4 text-center text-xs text-white/40 tracking-wide">
+              Review your video, then choose an action
+            </p>
+            <div className="flex gap-3">
+
+              {/* Discard / Retake */}
+              <button
+                onClick={handleDiscard}
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/8 py-4 active:scale-95 transition-transform backdrop-blur-md"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="#f87171" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+                <span className="text-sm font-semibold text-red-400">Retake</span>
+              </button>
+
+              {/* Save / Add */}
+              <button
+                onClick={handleSave}
+                disabled={saved}
+                className="flex flex-[2] items-center justify-center gap-2 rounded-2xl bg-white py-4 active:scale-95 transition-transform disabled:opacity-60"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                  <polyline points="17 21 17 13 7 13 7 21" />
+                  <polyline points="7 3 7 8 15 8" />
+                </svg>
+                <span className="text-sm font-bold text-black">Add Video</span>
+              </button>
+
+            </div>
           </div>
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════
-          LIVE CAMERA UI  (hidden during review screens)
-      ══════════════════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════
+          LIVE CAMERA UI
+      ══════════════════════════════════════════ */}
       {screen === "LIVE" && (
         <>
-          {/* Flash bang */}
           {flashBang && (
-            <div className="pointer-events-none absolute inset-0 z-50 animate-[flash_0.18s_ease-out] bg-white" />
+            <div className="pointer-events-none absolute inset-0 z-50 bg-white"
+              style={{ animation: "flash 0.18s ease-out forwards" }} />
           )}
 
-          {/* ── Top bar ── */}
+          {/* Top bar */}
           <div className="absolute inset-x-0 top-0 z-40 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-5 pt-12 pb-8">
-            {/* Back */}
             <button
               onClick={handleBack}
               className="flex h-10 w-10 items-center justify-center rounded-full bg-black/30 backdrop-blur-md active:scale-90 transition-transform"
@@ -499,7 +515,6 @@ export default function NativeCameraApp() {
               </svg>
             </button>
 
-            {/* Recording badge */}
             {isRecording && (
               <div className="flex items-center gap-2 rounded-full bg-red-600/90 px-4 py-1.5 font-mono text-sm font-bold backdrop-blur-md">
                 <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
@@ -507,7 +522,6 @@ export default function NativeCameraApp() {
               </div>
             )}
 
-            {/* Flip camera */}
             <button
               onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
               disabled={isBusy || isRecording}
@@ -520,7 +534,7 @@ export default function NativeCameraApp() {
             </button>
           </div>
 
-          {/* ── Zoom strip ── */}
+          {/* Zoom strip */}
           {!isRecording && (
             <div className="absolute bottom-36 inset-x-0 z-40 flex justify-center">
               <div className="flex items-center gap-3 rounded-full bg-black/30 px-2 py-1.5 backdrop-blur-md">
@@ -539,10 +553,8 @@ export default function NativeCameraApp() {
             </div>
           )}
 
-          {/* ── Bottom shutter area ── */}
+          {/* Bottom shutter area */}
           <div className="absolute inset-x-0 bottom-0 z-40 bg-gradient-to-t from-black/80 via-black/40 to-transparent pb-10 pt-10">
-
-            {/* Mode toggle */}
             <div className="mb-7 flex justify-center gap-8">
               {(["photo", "video"] as Mode[]).map((m) => (
                 <button
@@ -564,13 +576,11 @@ export default function NativeCameraApp() {
               ))}
             </div>
 
-            {/* Shutter row */}
             <div className="flex items-center justify-center">
               <button
                 onClick={handleShutter}
                 className="relative flex h-20 w-20 items-center justify-center"
               >
-                {/* Outer ring */}
                 <span className={`absolute inset-0 rounded-full border-4 transition-all duration-200 ${
                   isRecording
                     ? "border-red-500 scale-110"
@@ -578,18 +588,16 @@ export default function NativeCameraApp() {
                     ? "border-red-400/80"
                     : "border-white"
                 }`} />
-                {/* Inner fill */}
                 <span className={`transition-all duration-200 rounded-full ${
                   isRecording
-                    ? "h-9 w-9 rounded-lg bg-red-500"   // square-ish = stop
+                    ? "h-9 w-9 rounded-lg bg-red-500"
                     : mode === "video"
-                    ? "h-14 w-14 bg-red-500"             // red circle = record
-                    : "h-14 w-14 bg-white"               // white circle = photo
+                    ? "h-14 w-14 bg-red-500"
+                    : "h-14 w-14 bg-white"
                 }`} />
               </button>
             </div>
 
-            {/* Hint */}
             <p className="mt-4 text-center text-[11px] text-white/35 tracking-wide">
               {mode === "photo"
                 ? "Tap to capture"
@@ -601,23 +609,14 @@ export default function NativeCameraApp() {
         </>
       )}
 
-      {/* Back button visible during review too */}
-      {isReview && (
-        <button
-          onClick={handleBack}
-          className="absolute top-12 left-4 z-50 flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md active:scale-90 transition-transform"
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-            stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
-          </svg>
-        </button>
-      )}
-
       <style jsx>{`
         @keyframes flash {
           from { opacity: 1; }
           to   { opacity: 0; }
+        }
+        @keyframes reviewFadeIn {
+          from { opacity: 0; transform: scale(1.03); }
+          to   { opacity: 1; transform: scale(1); }
         }
       `}</style>
     </div>

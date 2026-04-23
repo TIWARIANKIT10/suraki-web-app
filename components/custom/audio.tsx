@@ -52,21 +52,19 @@ export default function AudioRecordCard() {
       };
 
       mediaRecorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        const url = URL.createObjectURL(blob);
-        setAudioURL(url);
-        audioRef.current = new Audio(url);
-        audioRef.current.onended = () => {
-          setRecordingState("recorded");
-          setPlaybackTime(0);
-          clearInterval(playbackTimerRef.current!);
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-  setAudio(blob, duration)
-
-        };
-        setRecordingState("recorded");
-        stream.getTracks().forEach((t) => t.stop());
-      };
+  const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+  const url = URL.createObjectURL(blob);
+  setAudioURL(url);
+  setAudio(blob, duration); // ← move here, outside onended
+  audioRef.current = new Audio(url);
+  audioRef.current.onended = () => {
+    setRecordingState("recorded");
+    setPlaybackTime(0);
+    clearInterval(playbackTimerRef.current!);
+  };
+  setRecordingState("recorded");
+  stream.getTracks().forEach((t) => t.stop());
+};
 
       mediaRecorder.start();
       setDuration(0);
@@ -176,26 +174,29 @@ export default function AudioRecordCard() {
         </div>
 
         {/* Recording Pulse Animation */}
-        {recordingState === "recording" && (
-          <div className="mb-4 flex items-center justify-center gap-1 py-3">
-            {[...Array(20)].map((_, i) => (
-              <div
-                key={i}
-                className="rounded-full"
-                style={{
-                  width: 3,
-                  backgroundColor: colors.redColor,
-                  height: Math.random() * 28 + 8,
-                  opacity: 0.6 + Math.random() * 0.4,
-                  animation: `pulse ${0.4 + Math.random() * 0.6}s ease-in-out infinite alternate`,
-                  animationDelay: `${i * 0.05}s`,
-                }}
-              />
-            ))}
-            <style>{`@keyframes pulse { from { transform: scaleY(0.3); } to { transform: scaleY(1); } }`}</style>
-          </div>
-        )}
-
+      {recordingState === "recording" && (
+  <div className="mb-4 flex items-center justify-center gap-1 py-3">
+    {[...Array(20)].map((_, i) => (
+      <div
+        key={i}
+        className="rounded-full"
+        style={{
+          width: 3,
+          backgroundColor: colors.redColor,
+          height: Math.random() * 28 + 8,
+          opacity: 0.6 + Math.random() * 0.4,
+          animationName: "pulse",
+          animationDuration: `${0.4 + Math.random() * 0.6}s`,
+          animationTimingFunction: "ease-in-out",
+          animationIterationCount: "infinite",
+          animationDirection: "alternate",
+          animationDelay: `${i * 0.05}s`,
+        }}
+      />
+    ))}
+    <style>{`@keyframes pulse { from { transform: scaleY(0.3); } to { transform: scaleY(1); } }`}</style>
+  </div>
+)}
         {/* Playback Progress Bar */}
         {isRecorded && (
           <div className="mb-4">
