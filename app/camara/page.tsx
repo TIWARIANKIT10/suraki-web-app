@@ -1,608 +1,578 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
+import { useIncidentStore } from "@/lib/store/incidentStore";
 
-type CameraMode = "photo" | "video";
-type RecordingState = "idle" | "previewing" | "recording" | "recorded";
+
+type Mode = "photo" | "video";
+type Screen = "LIVE" | "PHOTO_REVIEW" | "VIDEO_REVIEW";
 
 export default function NativeCameraApp() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const router = useRouter();
+  const { addPhoto, addVideo } = useIncidentStore();
+
+  const videoRef       = useRef<HTMLVideoElement>(null);
+  const reviewVideoRef = useRef<HTMLVideoElement>(null); // dedicated review video element
+  const recorderRef    = useRef<MediaRecorder | null>(null);
+  const streamRef      = useRef<MediaStream | null>(null);
+  const chunksRef      = useRef<Blob[]>([]);
   const playbackUrlRef = useRef<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isStartingRef  = useRef(false);
 
-  const [mode, setMode] = useState<CameraMode>("photo");
-  const [recordingState, setRecordingState] = useState<RecordingState>("idle");
-  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
-  const [capturedPhotos, setCapturedPhotos] = useState<string[]>([]);
-  const [facingMode, setFacingMode] = useState<"user" | "environment">("environment");
-  const [flashOn, setFlashOn] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const [isBusy, setIsBusy] = useState(false);
-  const [showFlashAnim, setShowFlashAnim] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [screen, setScreen]           = useState<Screen>("LIVE");
+  const [mode, setMode]               = useState<Mode>("photo");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isBusy, setIsBusy]           = useState(false);
 
-  // FIX 1: isStartingRef was declared but never used to guard startCamera.
-  // Added proper guard: set true at the top, clear in finally.
-  const isStartingRef = useRef(false);
+  const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(null);
+  const [videoBlob, setVideoBlob]       = useState<Blob | null>(null);
+  const [videoPlaybackUrl, setVideoPlaybackUrl] = useState<string | null>(null);
 
-  useEffect(() => {
-    let timer: ReturnType<typeof setInterval>;
-    if (recordingState === "recording") {
-      timer = setInterval(() => setRecordingTime((t) => t + 1), 1000);
-    }
-    return () => clearInterval(timer);
-  }, [recordingState]);
+  const [facing, setFacing]   = useState<"user" | "environment">("environment");
+  const [zoom, setZoom]       = useState(1);
+  const [recSecs, setRecSecs] = useState(0);
+  const [flashBang, setFlashBang] = useState(false);
+
+  // Saved toast state
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    return () => {
-      stopCameraTracks();
-      if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
-    };
-    // FIX 2: stopCameraTracks must be in the dependency array to satisfy the
-    // exhaustive-deps rule, but since it's stable (useCallback with no deps
-    // that change), this is safe and silences the lint warning.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!isRecording) { setRecSecs(0); return; }
+    const t = setInterval(() => setRecSecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [isRecording]);
 
-  const formattedDuration = useMemo(() => {
-    const m = Math.floor(recordingTime / 60).toString().padStart(2, "0");
-    const s = (recordingTime % 60).toString().padStart(2, "0");
+  const recLabel = useMemo(() => {
+    const m = String(Math.floor(recSecs / 60)).padStart(2, "0");
+    const s = String(recSecs % 60).padStart(2, "0");
     return `${m}:${s}`;
-  }, [recordingTime]);
+  }, [recSecs]);
 
-  const getSupportedMimeType = () => {
-    const types = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm",
-      "video/mp4",
-    ];
-    return types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
-  };
-
-  // FIX 3: stopCameraTracks had no dependency array — it must be wrapped in
-  // useCallback so it is stable and can be safely called from other callbacks.
-  const stopCameraTracks = useCallback(() => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
-      mediaStreamRef.current = null;
-    }
-
+  const stopStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
     if (videoRef.current) {
-      const oldStream = videoRef.current.srcObject as MediaStream | null;
-      if (oldStream) {
-        oldStream.getTracks().forEach((track) => track.stop());
-      }
+      (videoRef.current.srcObject as MediaStream | null)
+        ?.getTracks().forEach((t) => t.stop());
       videoRef.current.srcObject = null;
     }
   }, []);
 
   const startCamera = useCallback(async () => {
-    // FIX 1 (continued): guard prevents concurrent startCamera calls.
     if (isStartingRef.current) return;
     isStartingRef.current = true;
-
     setIsBusy(true);
-    setRecordingState("idle");
-    setRecordedBlob(null);
 
     try {
-      stopCameraTracks();
-      const baseVideoConstraints: MediaTrackConstraints = {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      };
-      const wantsAudio = mode === "video";
-
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            ...baseVideoConstraints,
-            facingMode: { ideal: facingMode },
-          },
-          audio: wantsAudio,
-        });
-      } catch (primaryErr) {
-        // Some devices/browsers can't satisfy facingMode constraints.
-        // Retry with generic video constraints so preview still works.
-        console.warn("Primary camera constraints failed, retrying:", primaryErr);
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: baseVideoConstraints,
-          audio: wantsAudio,
-        });
+      stopStream();
+      if (playbackUrlRef.current) {
+        URL.revokeObjectURL(playbackUrlRef.current);
+        playbackUrlRef.current = null;
       }
-      mediaStreamRef.current = stream;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: mode === "video",
+      });
+
+      streamRef.current = stream;
 
       if (videoRef.current) {
-        videoRef.current.pause();
         videoRef.current.srcObject = null;
         videoRef.current.src = "";
-        videoRef.current.load();
-        videoRef.current.srcObject = stream;
         videoRef.current.muted = true;
+        videoRef.current.controls = false;
+        videoRef.current.srcObject = stream;
         videoRef.current.playsInline = true;
-
         try {
-          if (videoRef.current.readyState < HTMLMediaElement.HAVE_METADATA) {
-            await new Promise<void>((resolve) => {
-              const videoEl = videoRef.current;
-              if (!videoEl) {
-                resolve();
-                return;
-              }
-              const onLoadedMetadata = () => {
-                videoEl.removeEventListener("loadedmetadata", onLoadedMetadata);
-                resolve();
-              };
-              videoEl.addEventListener("loadedmetadata", onLoadedMetadata, {
-                once: true,
-              });
-            });
-          }
           await videoRef.current.play();
-        } catch (playErr) {
-          if (playErr instanceof Error && playErr.name === "AbortError") {
-            return;
-          }
-          throw playErr;
+        } catch (e) {
+          if (e instanceof Error && e.name !== "AbortError") throw e;
         }
       }
 
-      setRecordingState("previewing");
+      setScreen("LIVE");
+      setIsRecording(false);
+      setPhotoDataUrl(null);
+      setVideoBlob(null);
+      setVideoPlaybackUrl(null);
+      setIsBusy(false);
     } catch (err) {
-      console.error("Error starting camera:", err);
+      console.error(err);
       alert("Camera access denied or unavailable.");
     } finally {
       setIsBusy(false);
-      // FIX 1 (continued): always release the guard.
       isStartingRef.current = false;
     }
-  }, [facingMode, mode, stopCameraTracks]);
+  }, [facing, mode, stopStream]);
 
+  useEffect(() => { startCamera(); }, [startCamera]);
+
+  useEffect(() => () => {
+    stopStream();
+    if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
+  }, [stopStream]);
+
+  // Auto-play review video when it becomes available
   useEffect(() => {
-    startCamera();
-  }, [startCamera]);
+    if (screen === "VIDEO_REVIEW" && videoPlaybackUrl && reviewVideoRef.current) {
+      reviewVideoRef.current.src = videoPlaybackUrl;
+      reviewVideoRef.current.load();
+      reviewVideoRef.current.play().catch(() => {});
+    }
+  }, [screen, videoPlaybackUrl]);
 
-  const takePhoto = () => {
-    if (!videoRef.current || !mediaStreamRef.current) return;
+  const capturePhoto = useCallback(() => {
+    const vid = videoRef.current;
+    if (!vid || vid.videoWidth === 0 || vid.readyState < 2) return;
 
-    setShowFlashAnim(true);
-    setTimeout(() => setShowFlashAnim(false), 150);
+    setFlashBang(true);
+    setTimeout(() => setFlashBang(false), 180);
 
-    const video = videoRef.current;
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 1920;
-    canvas.height = video.videoHeight || 1080;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    canvas.width  = vid.videoWidth;
+    canvas.height = vid.videoHeight;
+    const ctx = canvas.getContext("2d")!;
 
-    if (facingMode === "user") {
+    if (facing === "user") {
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
     }
-    ctx.drawImage(video, 0, 0);
+    ctx.drawImage(vid, 0, 0);
 
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-    setCapturedPhotos((prev) => [dataUrl, ...prev].slice(0, 50));
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.93);
+    vid.pause();
+    setPhotoDataUrl(dataUrl);
+    setScreen("PHOTO_REVIEW");
+  }, [facing]);
 
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = `photo-${Date.now()}.jpg`;
-    a.click();
-  };
-
-  const startRecording = () => {
-    if (!mediaStreamRef.current) return;
+  const startRecording = useCallback(() => {
+    if (!streamRef.current) return;
     chunksRef.current = [];
-    setRecordingTime(0);
-    setRecordedBlob(null);
 
-    const mime = getSupportedMimeType();
+    const mime = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+      .find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
+
     const recorder = new MediaRecorder(
-      mediaStreamRef.current,
+      streamRef.current,
       mime ? { mimeType: mime } : undefined
     );
-    mediaRecorderRef.current = recorder;
+    recorderRef.current = recorder;
 
     recorder.ondataavailable = (e) => {
       if (e.data?.size > 0) chunksRef.current.push(e.data);
     };
 
     recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, {
-        type: mime || "video/webm",
-      });
-      setRecordedBlob(blob);
-      setRecordingState("recorded");
-      stopCameraTracks();
+      const blob = new Blob(chunksRef.current, { type: mime || "video/webm" });
+      stopStream();
 
-      if (videoRef.current) {
-        if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
-        const url = URL.createObjectURL(blob);
-        playbackUrlRef.current = url;
-        videoRef.current.srcObject = null;
-        videoRef.current.src = url;
-        videoRef.current.muted = false;
-        // FIX 4: controls should default to true after recording so the user
-        // can play/pause the recorded clip without a separate play button.
-        videoRef.current.controls = true;
-        videoRef.current.play().catch(() => {});
-      }
+      const url = URL.createObjectURL(blob);
+      playbackUrlRef.current = url;
+
+      setVideoBlob(blob);
+      setVideoPlaybackUrl(url);
+      setIsRecording(false);
+      setScreen("VIDEO_REVIEW");
     };
 
     recorder.start(1000);
-    setRecordingState("recording");
-  };
+    setIsRecording(true);
+  }, [stopStream]);
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.stop();
+  const stopRecording = useCallback(() => {
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
     }
-  };
+  }, []);
 
-  const handleShutter = () => {
+  const handleShutter = useCallback(() => {
     if (mode === "photo") {
-      takePhoto();
+      capturePhoto();
     } else {
-      if (recordingState === "recording") stopRecording();
-      else if (recordingState === "previewing") startRecording();
+      isRecording ? stopRecording() : startRecording();
     }
-  };
+  }, [mode, isRecording, capturePhoto, stopRecording, startRecording]);
 
-  const flipCamera = () => {
-    setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
-  };
-
-  const retake = async () => {
-    setRecordedBlob(null);
-    setRecordingTime(0);
-
-    if (videoRef.current) {
-      videoRef.current.src = "";
-      // FIX 5: controls must be reset to false so the live preview
-      // doesn't show native browser controls.
-      videoRef.current.controls = false;
+  const handleSave = useCallback(() => {
+    if (screen === "PHOTO_REVIEW" && photoDataUrl) {
+      addPhoto(photoDataUrl);
+    } else if (screen === "VIDEO_REVIEW" && videoBlob) {
+      addVideo(videoBlob);
     }
+    setSaved(true);
+    setTimeout(() => {
+      stopStream();
+      if (playbackUrlRef.current) {
+        URL.revokeObjectURL(playbackUrlRef.current);
+        playbackUrlRef.current = null;
+      }
+      router.push("/");
+    }, 900);
+  }, [screen, photoDataUrl, videoBlob, addPhoto, addVideo, stopStream, router]);
 
-    if (playbackUrlRef.current) {
-      URL.revokeObjectURL(playbackUrlRef.current);
-      playbackUrlRef.current = null;
+  const handleDiscard = useCallback(() => {
+    if (reviewVideoRef.current) {
+      reviewVideoRef.current.pause();
+      reviewVideoRef.current.src = "";
     }
-
-    await startCamera();
-  };
-
-  const downloadVideo = () => {
-    if (!recordedBlob) return;
-    const url = URL.createObjectURL(recordedBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `video-${Date.now()}.webm`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const router = useRouter();
+    startCamera();
+  }, [startCamera]);
 
   const handleBack = () => {
-    stopCameraTracks();
-
-    if (playbackUrlRef.current) {
-      URL.revokeObjectURL(playbackUrlRef.current);
-      playbackUrlRef.current = null;
-    }
-
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.srcObject = null;
-      videoRef.current.src = "";
-      // FIX 6: load() forces the browser to release media resources;
-      // resetting src to "" first ensures no stale source is reloaded.
-      videoRef.current.load();
-    }
-
-    setTimeout(() => {
-      router.push("/");
-    }, 100);
+    if (isRecording) stopRecording();
+    stopStream();
+    if (playbackUrlRef.current) URL.revokeObjectURL(playbackUrlRef.current);
+    setTimeout(() => router.push("/"), 80);
   };
 
-  // FIX 7: mode switcher must restart the camera (via the useEffect that
-  // depends on startCamera, which depends on `mode`). However, switching
-  // modes while recording must stop the recorder first so no resources leak.
-  const handleModeSwitch = (newMode: CameraMode) => {
-    if (recordingState === "recording") {
-      stopRecording();
-    }
-    setMode(newMode);
+  const handleModeSwitch = (m: Mode) => {
+    if (isRecording) stopRecording();
+    setMode(m);
   };
 
-  const lastCapture = capturedPhotos[0];
+  const isReview = screen === "PHOTO_REVIEW" || screen === "VIDEO_REVIEW";
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black text-white select-none">
-      <button
-        onClick={handleBack}
-        className="absolute top-12 left-4 z-50 flex h-10 w-10 items-center justify-center rounded-full bg-black/30 backdrop-blur-md transition-all active:scale-90 hover:bg-black/50"
-        aria-label="Go back"
-      >
-        <svg
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M19 12H5" />
-          <path d="M12 19l-7-7 7-7" />
-        </svg>
-      </button>
 
-      {/* Full-screen Video Preview */}
+      {/* Live viewfinder — always mounted, hidden during review */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
-        // FIX 8: muted was a ternary comparing recordingState to "recorded",
-        // but after recording the video needs audio for playback. The muted
-        // attribute is set imperatively in startCamera (true) and onstop (false),
-        // so this JSX attribute just sets the initial value.
         muted
-        className={`absolute inset-0 h-full w-full object-cover transition-transform duration-300 ${
-          facingMode === "user" && recordingState !== "recorded"
-            ? "scale-x-[-1]"
-            : ""
-        }`}
-        // FIX 9: zoom was applied via `style` but the className already
-        // contains a `transition-transform`. Merging both into one style prop
-        // (using scaleX for mirror + scale for zoom) would have conflicted.
-        // Instead, apply zoom only — the mirror flip is handled by className.
+        className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
         style={{
+          opacity: isReview ? 0 : 1,
           transform:
-            facingMode === "user" && recordingState !== "recorded"
+            facing === "user" && screen !== "VIDEO_REVIEW"
               ? `scaleX(-1) scale(${zoom})`
               : `scale(${zoom})`,
         }}
       />
 
-      {/* White Flash Animation for Photo */}
-      {showFlashAnim && (
-        <div className="pointer-events-none absolute inset-0 z-50 bg-white animate-[flash_0.15s_ease-out]" />
-      )}
+      {/* ══════════════════════════════════════════
+          PHOTO REVIEW SCREEN
+      ══════════════════════════════════════════ */}
+      {screen === "PHOTO_REVIEW" && photoDataUrl && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-black">
 
-      {/* Top Controls Bar */}
-      <div className="absolute top-0 z-40 flex w-full items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-6 pt-12 pb-6">
-        <button
-          onClick={() => setFlashOn(!flashOn)}
-          className={`rounded-full p-2 backdrop-blur-md transition-all ${
-            flashOn
-              ? "bg-yellow-400/30 text-yellow-300"
-              : "bg-black/20 text-white"
-          }`}
-        >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-          </svg>
-        </button>
-
-        {recordingState === "recording" && (
-          <div className="flex items-center gap-2 rounded-full bg-red-600/90 px-4 py-1.5 font-mono text-sm font-semibold backdrop-blur-md">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
-            {formattedDuration}
-          </div>
-        )}
-
-        <button
-          onClick={flipCamera}
-          // FIX 10: flipCamera must also be blocked while recording to prevent
-          // switching cameras mid-recording, which would corrupt the stream.
-          disabled={isBusy || recordingState === "recording"}
-          className="rounded-full bg-black/20 p-2 backdrop-blur-md transition-all active:scale-90 disabled:opacity-50"
-        >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Zoom Controls */}
-      {recordingState === "previewing" && (
-        <div className="absolute bottom-32 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-black/30 p-1.5 backdrop-blur-md">
-          {[1, 1.5, 2].map((z) => (
-            <button
-              key={z}
-              onClick={() => setZoom(z)}
-              className={`rounded-full px-3 py-1 text-xs font-bold transition-all ${
-                zoom === z
-                  ? "bg-white text-black"
-                  : "text-white hover:bg-white/20"
-              }`}
-            >
-              {z}x
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Bottom Control Area */}
-      <div className="absolute bottom-0 z-40 w-full bg-gradient-to-t from-black/80 via-black/40 to-transparent pb-10 pt-12">
-        {/* Mode Toggle — FIX 7: use handleModeSwitch instead of setMode directly */}
-        <div className="mb-6 flex justify-center">
-          <div className="flex gap-6 text-sm font-medium tracking-wider">
-            <button
-              onClick={() => handleModeSwitch("photo")}
-              className={`relative pb-1 transition-all ${
-                mode === "photo" ? "text-yellow-400" : "text-white/60"
-              }`}
-            >
-              PHOTO
-              {mode === "photo" && (
-                <span className="absolute -bottom-1 left-1/2 h-0.5 w-4 -translate-x-1/2 rounded-full bg-yellow-400" />
-              )}
-            </button>
-            <button
-              onClick={() => handleModeSwitch("video")}
-              className={`relative pb-1 transition-all ${
-                mode === "video" ? "text-red-400" : "text-white/60"
-              }`}
-            >
-              VIDEO
-              {mode === "video" && (
-                <span className="absolute -bottom-1 left-1/2 h-0.5 w-4 -translate-x-1/2 rounded-full bg-red-400" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Main Controls Row */}
-        <div className="flex items-center justify-between px-8">
-          {/* Gallery Thumbnail / Retake */}
-          <div className="flex h-14 w-14 items-center justify-center">
-            {recordingState === "recorded" ? (
-              <button
-                onClick={retake}
-                className="flex h-12 w-12 items-center justify-center rounded-full bg-white/20 text-sm font-bold backdrop-blur-md"
-              >
-                ↺
-              </button>
-            ) : (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="relative h-12 w-12 overflow-hidden rounded-lg border-2 border-white/30 bg-gray-800"
-              >
-                {lastCapture ? (
-                  <img
-                    src={lastCapture}
-                    alt="last capture"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-xs text-white/50">
-                    <svg
-                      width="20"
-                      height="20"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    >
-                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                      <circle cx="8.5" cy="8.5" r="1.5" />
-                      <polyline points="21 15 16 10 5 21" />
-                    </svg>
-                  </div>
-                )}
-              </button>
-            )}
-          </div>
-
-          {/* SHUTTER BUTTON */}
-          <button
-            onClick={handleShutter}
-            disabled={recordingState === "recorded" || isBusy}
-            className="group relative flex h-20 w-20 items-center justify-center disabled:opacity-50"
-          >
-            <div
-              className={`absolute inset-0 rounded-full border-4 transition-all duration-300 ${
-                recordingState === "recording"
-                  ? "border-red-500 scale-110"
-                  : mode === "video"
-                  ? "border-red-500/80"
-                  : "border-white"
-              }`}
+          {/* Fullscreen photo */}
+          <div className="relative flex-1 overflow-hidden">
+            <img
+              src={photoDataUrl}
+              alt="Captured photo"
+              className="h-full w-full object-contain"
+              style={{ animation: "reviewFadeIn 0.35s ease-out" }}
             />
-            <div
-              className={`h-16 w-16 transition-all duration-300 ${
-                recordingState === "recording"
-                  ? "bg-red-500 scale-50 rounded-sm"
-                  : mode === "video"
-                  ? "bg-red-600 rounded-full"
-                  : "bg-white rounded-full"
-              }`}
-            />
-          </button>
 
-          {/* Download / Empty spacer */}
-          <div className="flex h-14 w-14 items-center justify-center">
-            {recordingState === "recorded" && mode === "video" && (
+            {/* Top gradient + label */}
+            <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/80 to-transparent" />
+            <div className="absolute top-0 inset-x-0 flex items-center justify-between px-4 pt-12">
               <button
-                onClick={downloadVideo}
-                className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/90 text-black backdrop-blur-md"
+                onClick={handleDiscard}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md active:scale-90 transition-transform"
               >
-                <svg
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
                 </svg>
               </button>
+              <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/80 bg-black/30 px-3 py-1 rounded-full backdrop-blur-md">
+                📷 Photo Preview
+              </span>
+              <div className="w-10" />
+            </div>
+
+            {/* Saved overlay */}
+            {saved && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                style={{ animation: "reviewFadeIn 0.2s ease-out" }}>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-white">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+                      stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <p className="text-lg font-semibold text-white">Photo Saved!</p>
+                </div>
+              </div>
             )}
           </div>
-        </div>
 
-        {/* Hint Text */}
-        <div className="mt-4 text-center text-xs text-white/50">
-          {recordingState === "recorded"
-            ? "Video saved. Tap ↺ to retake or ⬇ to download"
-            : mode === "photo"
-            ? "Tap shutter to take photo"
-            : recordingState === "recording"
-            ? "Tap shutter to stop recording"
-            : "Tap shutter to start recording"}
-        </div>
-      </div>
+          {/* Bottom action bar */}
+          <div className="flex-shrink-0 bg-black px-5 pb-10 pt-5">
+            <p className="mb-4 text-center text-xs text-white/40 tracking-wide">
+              Choose what to do with this photo
+            </p>
+            <div className="flex gap-3">
 
-      {/* Hidden file input */}
-      <input
-        type="file"
-        ref={fileInputRef}
-        className="hidden"
-        accept="image/*"
-      />
+              {/* Discard */}
+              <button
+                onClick={handleDiscard}
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/8 py-4 active:scale-95 transition-transform backdrop-blur-md"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="#f87171" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+                <span className="text-sm font-semibold text-red-400">Retake</span>
+              </button>
+
+              {/* Save / Add */}
+              <button
+                onClick={handleSave}
+                disabled={saved}
+                className="flex flex-[2] items-center justify-center gap-2 rounded-2xl bg-white py-4 active:scale-95 transition-transform disabled:opacity-60"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                  <polyline points="17 21 17 13 7 13 7 21" />
+                  <polyline points="7 3 7 8 15 8" />
+                </svg>
+                <span className="text-sm font-bold text-black">Add Photo</span>
+              </button>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════
+          VIDEO REVIEW SCREEN
+      ══════════════════════════════════════════ */}
+      {screen === "VIDEO_REVIEW" && videoPlaybackUrl && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-black">
+
+          {/* Video player area */}
+          <div className="relative flex-1 overflow-hidden bg-black">
+            <video
+              ref={reviewVideoRef}
+              playsInline
+              controls
+              loop
+              muted={false}
+              className="h-full w-full object-contain"
+              style={{ animation: "reviewFadeIn 0.35s ease-out" }}
+            />
+
+            {/* Top overlay */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/80 to-transparent" />
+            <div className="absolute top-0 inset-x-0 flex items-center justify-between px-4 pt-12 pointer-events-none">
+              <div className="w-10" />
+              <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/80 bg-black/30 px-3 py-1 rounded-full backdrop-blur-md">
+                🎬 Video Preview
+              </span>
+              <div className="w-10" />
+            </div>
+
+            {/* Back button — pointer events enabled */}
+            <button
+              onClick={handleDiscard}
+              className="absolute top-12 left-4 flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md active:scale-90 transition-transform"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+              </svg>
+            </button>
+
+            {/* Saved overlay */}
+            {saved && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                style={{ animation: "reviewFadeIn 0.2s ease-out" }}>
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-white">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+                      stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <p className="text-lg font-semibold text-white">Video Saved!</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Bottom action bar */}
+          <div className="flex-shrink-0 bg-black px-5 pb-10 pt-5">
+            <p className="mb-4 text-center text-xs text-white/40 tracking-wide">
+              Review your video, then choose an action
+            </p>
+            <div className="flex gap-3">
+
+              {/* Discard / Retake */}
+              <button
+                onClick={handleDiscard}
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/8 py-4 active:scale-95 transition-transform backdrop-blur-md"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="#f87171" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+                <span className="text-sm font-semibold text-red-400">Retake</span>
+              </button>
+
+              {/* Save / Add */}
+              <button
+                onClick={handleSave}
+                disabled={saved}
+                className="flex flex-[2] items-center justify-center gap-2 rounded-2xl bg-white py-4 active:scale-95 transition-transform disabled:opacity-60"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                  stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                  <polyline points="17 21 17 13 7 13 7 21" />
+                  <polyline points="7 3 7 8 15 8" />
+                </svg>
+                <span className="text-sm font-bold text-black">Add Video</span>
+              </button>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════
+          LIVE CAMERA UI
+      ══════════════════════════════════════════ */}
+      {screen === "LIVE" && (
+        <>
+          {flashBang && (
+            <div className="pointer-events-none absolute inset-0 z-50 bg-white"
+              style={{ animation: "flash 0.18s ease-out forwards" }} />
+          )}
+
+          {/* Top bar */}
+          <div className="absolute inset-x-0 top-0 z-40 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-5 pt-12 pb-8">
+            <button
+              onClick={handleBack}
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-black/30 backdrop-blur-md active:scale-90 transition-transform"
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+              </svg>
+            </button>
+
+            {isRecording && (
+              <div className="flex items-center gap-2 rounded-full bg-red-600/90 px-4 py-1.5 font-mono text-sm font-bold backdrop-blur-md">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
+                {recLabel}
+              </div>
+            )}
+
+            <button
+              onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
+              disabled={isBusy || isRecording}
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-black/30 backdrop-blur-md active:scale-90 transition-transform disabled:opacity-40"
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Zoom strip */}
+          {!isRecording && (
+            <div className="absolute bottom-36 inset-x-0 z-40 flex justify-center">
+              <div className="flex items-center gap-3 rounded-full bg-black/30 px-2 py-1.5 backdrop-blur-md">
+                {[1, 1.5, 2].map((z) => (
+                  <button
+                    key={z}
+                    onClick={() => setZoom(z)}
+                    className={`rounded-full px-3 py-1 text-xs font-bold transition-all ${
+                      zoom === z ? "bg-white text-black" : "text-white/70"
+                    }`}
+                  >
+                    {z}×
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Bottom shutter area */}
+          <div className="absolute inset-x-0 bottom-0 z-40 bg-gradient-to-t from-black/80 via-black/40 to-transparent pb-10 pt-10">
+            <div className="mb-7 flex justify-center gap-8">
+              {(["photo", "video"] as Mode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => handleModeSwitch(m)}
+                  className={`relative pb-1 text-sm font-semibold tracking-widest transition-all ${
+                    mode === m
+                      ? m === "photo" ? "text-yellow-400" : "text-red-400"
+                      : "text-white/50"
+                  }`}
+                >
+                  {m.toUpperCase()}
+                  {mode === m && (
+                    <span className={`absolute -bottom-0.5 left-1/2 -translate-x-1/2 h-0.5 w-5 rounded-full ${
+                      m === "photo" ? "bg-yellow-400" : "bg-red-400"
+                    }`} />
+                  )}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-center">
+              <button
+                onClick={handleShutter}
+                className="relative flex h-20 w-20 items-center justify-center"
+              >
+                <span className={`absolute inset-0 rounded-full border-4 transition-all duration-200 ${
+                  isRecording
+                    ? "border-red-500 scale-110"
+                    : mode === "video"
+                    ? "border-red-400/80"
+                    : "border-white"
+                }`} />
+                <span className={`transition-all duration-200 rounded-full ${
+                  isRecording
+                    ? "h-9 w-9 rounded-lg bg-red-500"
+                    : mode === "video"
+                    ? "h-14 w-14 bg-red-500"
+                    : "h-14 w-14 bg-white"
+                }`} />
+              </button>
+            </div>
+
+            <p className="mt-4 text-center text-[11px] text-white/35 tracking-wide">
+              {mode === "photo"
+                ? "Tap to capture"
+                : isRecording
+                ? "Tap to stop recording"
+                : "Tap to start recording"}
+            </p>
+          </div>
+        </>
+      )}
 
       <style jsx>{`
         @keyframes flash {
-          0% {
-            opacity: 1;
-          }
-          100% {
-            opacity: 0;
-          }
+          from { opacity: 1; }
+          to   { opacity: 0; }
+        }
+        @keyframes reviewFadeIn {
+          from { opacity: 0; transform: scale(1.03); }
+          to   { opacity: 1; transform: scale(1); }
         }
       `}</style>
     </div>

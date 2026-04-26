@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Camera, Mic, MapPin, ChevronRight, Info, RefreshCw } from "lucide-react"
+import { Camera, Mic, MapPin, ChevronRight, Info, RefreshCw, Check } from "lucide-react"
 import InstallPWAButton from '../components/custom/InstallPWAButton';
 import { useRouter } from 'next/navigation';
 import GPSLocation from "@/components/custom/location";
@@ -34,7 +34,14 @@ function MediaUploadCard({
   isUploaded,
   uploadedText,
   onClick,
-}: MediaUploadCardProps) {
+}: MediaUploadCardProps)
+
+
+
+{
+const media = useIncidentStore((s) => s.media);
+console.log(media)
+const click = media == null? false:true;
   return (
     <div className="mb-5">
       <p className="mb-2 text-base font-semibold" style={{ color: colors.primary2 }}>
@@ -70,62 +77,155 @@ function MediaUploadCard({
               )}
             </div>
           </div>
-
-          <ChevronRight size={22} color={colors.primary4} />
+     <div className="flex flex-col">
+          { click && (
+                      <div className="ml-auto flex items-center gap-1 rounded-full px-2 py-1" style={{ backgroundColor: `${colors.primary3}18` }}>
+                        <Check size={12} color={colors.primary3} />
+                        <span className="text-xs font-medium" style={{ color: colors.primary3 }}>
+                          Saved
+                        </span>
+                      </div>
+                    )}
+                    {!click && <ChevronRight size={22} color={colors.primary4} />}
+                    </div>
+          
         </div>
       </button>
     </div>
   )
 }
 
-export default function IncidentReportPage() {
-  const [description, setDescription] = useState("")
-  const [incidentType, setIncidentType] = useState("")
+export default function IncidentReportPage() {  
 
-  const [loadingLocation, setLoadingLocation] = useState(false)
+
+  
+const {setIncidentType,
+  setDescription ,reset
+
+} = useIncidentStore()
+
+const store = useIncidentStore();
+console.log(store)
+  
+  
+  
+
+  
 
   // UI-only mock states
   const [imageUploaded, setImageUploaded] = useState(false)
   const [audioUploaded, setAudioUploaded] = useState(false)
 
   const resetForm = () => {
-    setDescription("")
-    setIncidentType("")
-    setImageUploaded(false)
-    setAudioUploaded(false)
+    setSubmitting(false);
+    reset();
   }
 
-const {  imageFile, audioBlob,
-          audioDuration, gpsLocation,
-            reset } = useIncidentStore()
+
 
   const [submitting, setSubmitting] = useState(false)
   const [submitStatus, setSubmitStatus] = useState<"idle"|"success"|"error">("idle")
 
-  const handleSubmit = async () => {
-    setSubmitting(true)
-    try {
-      const payload = new FormData()
-      payload.append("description", description)
-      payload.append("incidentType", incidentType)
-      payload.append("latitude",  String(gpsLocation?.latitude ?? ""))
-      payload.append("longitude", String(gpsLocation?.longitude ?? ""))
-      payload.append("audioDuration", String(audioDuration))
-      if (imageFile) payload.append("image", imageFile)
-      if (audioBlob) payload.append("audio", audioBlob, "recording.webm")
+ const handleSubmit = async () => {
+  setSubmitting(true);
+  try {
+    const { media, description, incidentType, audioBlob, gpsLocation, reset } = store;
 
-      const res = await fetch("/api/incidents", { method: "POST", body: payload })
-      if (!res.ok) throw new Error("Failed")
+    const FILE_URL = process.env.NEXT_PUBLIC_FILE_UPLOAD_URL!;
+    const FILE_KEY = process.env.NEXT_PUBLIC_FILE_UPLOAD_KEY!;
+    const API_URL  = process.env.NEXT_PUBLIC_API_URL!;
 
-      setSubmitStatus("success")
-      reset()   // ← clears entire store after success
-    } catch {
-      setSubmitStatus("error")
-    } finally {
-      setSubmitting(false)
+    // ── shared upload helper ──────────────────────────────────
+    const uploadFile = async (blob: Blob, filename: string,apiurl:string): Promise<string> => {
+      const form = new FormData();
+      form.append("files", blob, filename);          // "files" field
+
+      const res = await fetch(apiurl, {
+        method: "POST",
+        headers: { key: FILE_KEY },                 // no Content-Type — browser sets boundary
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const data = await res.json();
+      const raw = data.url ?? data.file_url ?? data.path;
+  const url = Array.isArray(raw) ? raw[0] : raw;
+
+  if (!url) throw new Error(`No URL in response: ${JSON.stringify(data)}`);
+  return url as string;
+    };
+
+    // ── Step 1: upload audio → array ──────────────────────────
+    const voiceUrls: string[] = [];
+    if (audioBlob) {
+      const url = await uploadFile(audioBlob, "audio.webm",FILE_URL+"/suraki/");
+      voiceUrls.push(url);
     }
+
+    // ── Step 2: upload image/video → array ───────────────────
+    const mediaUrls: string[] = [];
+    if (media) {
+      let blob: Blob | null = null;
+      let filename = "";
+
+      if (media.type === "photo" && media.dataUrl) {
+        blob     = dataUrlToBlob(media.dataUrl);
+        filename = `photo-${media.id}.jpg`;
+       if (blob) {
+        const url = await uploadFile(blob, filename,FILE_URL+"/suraki/");
+        mediaUrls.push(url);
+      }
+      } else if (media.type === "video" && media.blob) {
+        blob     = media.blob;
+        filename = `video-${media.id}.webm`;
+       if (blob) {
+        const url = await uploadFile(blob, filename,FILE_URL+"/temp_fon/");
+        mediaUrls.push(url);
+      }
+      }
+    }
+
+    // ── Step 3: submit report ─────────────────────────────────
+    const payload = {
+      description,
+      incident_type: incidentType,
+      ...(gpsLocation && {
+        gps_location: `${gpsLocation.latitude},${gpsLocation.longitude}`,
+      }),
+      ...(voiceUrls.length  && { voice:voiceUrls[0] }),   // array
+      ...(mediaUrls.length  && { image_video:mediaUrls[0] }),   // array
+    };
+
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(JSON.stringify(error));
+    }
+
+    setSubmitStatus("success");
+    reset();
+  } catch (err) {
+    console.error(err);
+    setSubmitStatus("error");
+  } finally {
+    setSubmitting(false);
   }
+};
   const router = useRouter()
+  function dataUrlToBlob(dataUrl: string): Blob {
+  const [header, base64] = dataUrl.split(",");
+  const mime = header.match(/:(.*?);/)?.[1] ?? "image/jpeg";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
 
   return (
     <main className="min-h-screen pb-36" style={{ backgroundColor: colors.bgColor }}>
@@ -172,6 +272,8 @@ const {  imageFile, audioBlob,
           onClick={() => router.push("/camara")}
         />
 
+         <AudioRecordCard/>
+
         {/* Description */}
         <div className="mb-5">
           <p className="mb-2 text-base font-semibold" style={{ color: colors.primary2 }}>
@@ -179,7 +281,7 @@ const {  imageFile, audioBlob,
           </p>
           <div className="rounded-2xl bg-white p-3 shadow-sm">
             <textarea
-              value={description}
+              value={store.description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="छोटोमा घटनाको विवरण लेख्नुहोस (Write a short description....)"
               className="h-28 w-full resize-none rounded-xl border p-3 text-sm outline-none focus:ring-2"
@@ -191,10 +293,9 @@ const {  imageFile, audioBlob,
           </div>
         </div>
 
-        {/* GPS */}
-       <GPSLocation/>
+        
 
-       <AudioRecordCard/>
+      
 
         {/* Incident Type */}
         <div className="mb-5">
@@ -202,10 +303,10 @@ const {  imageFile, audioBlob,
             घटनाको प्रकार (Incident type)
           </p>
           <select
-            value={incidentType}
+            value={store.incidentType}
             onChange={(e) => setIncidentType(e.target.value)}
             className="h-12 w-full rounded-xl border bg-white px-3 text-sm shadow-sm outline-none focus:ring-2"
-            style={{ borderColor: "#E4ECE8", color: incidentType ? "#101828" : "#98A2B3" }}
+            style={{ borderColor: "#E4ECE8", color: store.incidentType ? "#101828" : "#98A2B3" }}
           >
             <option value="">Select Incident Type</option>
             <option value="trade">Trade</option>
@@ -213,7 +314,8 @@ const {  imageFile, audioBlob,
             <option value="other">Other</option>
           </select>
         </div>
-
+    {/* GPS */}
+       <GPSLocation/>
         {/* Disclaimer */}
         <div className="rounded-2xl bg-white p-4 shadow-sm">
           <div className="mb-2 flex items-center gap-2">

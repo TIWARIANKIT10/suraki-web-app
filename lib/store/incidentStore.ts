@@ -2,11 +2,19 @@ import { create } from "zustand"
 
 type GPSLocation = { latitude: number; longitude: number }
 
+interface CapturedMedia {
+  id: string;
+  type: "photo" | "video";
+  dataUrl?: string;
+  blob?: Blob;
+  timestamp: number;
+} 
+
 type IncidentStore = {
   // ─── State ───────────────────────────────
+  media: CapturedMedia | null;
   description: string
   incidentType: string
-  imageFile: File | null
   audioBlob: Blob | null
   audioDuration: number
   gpsLocation: GPSLocation | null
@@ -14,16 +22,17 @@ type IncidentStore = {
   // ─── Actions ─────────────────────────────
   setDescription: (val: string) => void
   setIncidentType: (val: string) => void
-  setImage: (file: File | null) => void
   setAudio: (blob: Blob | null, duration: number) => void
   setGPS: (coords: GPSLocation) => void
+  addPhoto: (dataUrl: string) => void
+  addVideo: (blob: Blob) => void
   reset: () => void
 }
 
 const initialState = {
+  media: null,
   description: "",
   incidentType: "",
-  imageFile: null,
   audioBlob: null,
   audioDuration: 0,
   gpsLocation: null,
@@ -34,8 +43,17 @@ export const useIncidentStore = create<IncidentStore>((set) => ({
 
   setDescription:  (val) => set({ description: val }),
   setIncidentType: (val) => set({ incidentType: val }),
-  setImage:        (file) => set({ imageFile: file }),
   setAudio:        (blob, duration) => set({ audioBlob: blob, audioDuration: duration }),
   setGPS:          (coords) => set({ gpsLocation: coords }),
   reset:           () => set(initialState),
+
+  addPhoto: (dataUrl) =>
+    set({
+      media: { id: `photo-${Date.now()}`, type: "photo", dataUrl, timestamp: Date.now() },
+    }),
+
+  addVideo: (blob) =>
+    set({
+      media: { id: `video-${Date.now()}`, type: "video", blob, timestamp: Date.now() },
+    }),
 }))

@@ -18,6 +18,7 @@ export default function AudioRecordCard() {
 
 
     const setAudio = useIncidentStore((s) => s.setAudio)
+    const audioBlob =  useIncidentStore((s) => s.audioBlob);
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [duration, setDuration] = useState(0);
   const [playbackTime, setPlaybackTime] = useState(0);
@@ -96,7 +97,7 @@ export default function AudioRecordCard() {
     clearInterval(playbackTimerRef.current!);
   };
 
-  const discardRecording = () => {
+    const discardRecording = () => {
     setAudio(null, 0) 
     audioRef.current?.pause();
     clearInterval(timerRef.current!);
@@ -109,7 +110,7 @@ export default function AudioRecordCard() {
     setRecordingState("idle");
     setError(null);
   };
-
+ 
   useEffect(() => {
     return () => {
       clearInterval(timerRef.current!);
@@ -163,7 +164,7 @@ export default function AudioRecordCard() {
             </p>
           </div>
 
-          {isRecorded && (
+          {audioBlob && (
             <div className="ml-auto flex items-center gap-1 rounded-full px-2 py-1" style={{ backgroundColor: `${colors.primary3}18` }}>
               <Check size={12} color={colors.primary3} />
               <span className="text-xs font-medium" style={{ color: colors.primary3 }}>

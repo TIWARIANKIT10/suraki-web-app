@@ -8,47 +8,19 @@ import React, {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
-import { create } from "zustand";
+import { useIncidentStore } from "@/lib/store/incidentStore";
+
 
 // ─── Zustand Store ────────────────────────────────────────────────────────────
-interface CapturedMedia {
-  id: string;
-  type: "photo" | "video";
-  dataUrl?: string;
-  blob?: Blob;
-  timestamp: number;
-}
 
-interface CameraStore {
-  media: CapturedMedia[];
-  addPhoto: (dataUrl: string) => void;
-  addVideo: (blob: Blob) => void;
-}
-
-export const useCameraStore = create<CameraStore>((set) => ({
-  media: [],
-  addPhoto: (dataUrl) =>
-    set((s) => ({
-      media: [
-        { id: `photo-${Date.now()}`, type: "photo", dataUrl, timestamp: Date.now() },
-        ...s.media,
-      ],
-    })),
-  addVideo: (blob) =>
-    set((s) => ({
-      media: [
-        { id: `video-${Date.now()}`, type: "video", blob, timestamp: Date.now() },
-        ...s.media,
-      ],
-    })),
-}));
 
 type Mode = "photo" | "video";
 type Screen = "LIVE" | "PHOTO_REVIEW" | "VIDEO_REVIEW";
 
 export default function NativeCameraApp() {
   const router = useRouter();
-  const { addPhoto, addVideo } = useCameraStore();
+
+  const { addPhoto, addVideo } = useIncidentStore();
 
   const videoRef       = useRef<HTMLVideoElement>(null);
   const reviewVideoRef = useRef<HTMLVideoElement>(null); // dedicated review video element
@@ -242,8 +214,10 @@ recorder.onstop = () => {
   }, [mode, isRecording, capturePhoto, stopRecording, startRecording]);
 
   const handleSave = useCallback(() => {
+    console.log("save button working ")
     if (screen === "PHOTO_REVIEW" && photoDataUrl) {
       addPhoto(photoDataUrl);
+
     } else if (screen === "VIDEO_REVIEW" && videoBlob) {
       addVideo(videoBlob);
     }

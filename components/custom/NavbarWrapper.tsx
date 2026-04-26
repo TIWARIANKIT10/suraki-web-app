@@ -7,7 +7,7 @@ export default function NavbarWrapper() {
   const pathname = usePathname();
 
   // Show Navbar only on home page
-  if (pathname !== "/") return null;
+  if (pathname == "/camara") return null;
 
   return <Navbar />;
 }
