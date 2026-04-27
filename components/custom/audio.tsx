@@ -19,7 +19,8 @@ export default function AudioRecordCard() {
 
     const setAudio = useIncidentStore((s) => s.setAudio)
     const audioBlob =  useIncidentStore((s) => s.audioBlob);
-  const [recordingState, setRecordingState] = useState<RecordingState>("idle");
+    const recordingState =  useIncidentStore((s) => s.recordingState);
+    const setRecordingState = useIncidentStore((s)=>s.setRecordingState)
   const [duration, setDuration] = useState(0);
   const [playbackTime, setPlaybackTime] = useState(0);
   const [audioURL, setAudioURL] = useState<string | null>(null);
